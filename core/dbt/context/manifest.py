@@ -1,4 +1,4 @@
-from typing import Any, List, Union
+from typing import Any, Iterator, List, Union
 
 from dbt.adapters.contracts.connection import AdapterRequiredConfig
 from dbt.clients.jinja import MacroStack
@@ -21,6 +21,11 @@ class MacroDictProxy(dict):
     Python's ``dict`` only calls ``__missing__`` from ``__getitem__`` — Jinja's
     ``Context.resolve`` uses ``in`` before subscripting, and other call sites
     (e.g. unit-test override resolution) use ``in``/``get`` directly.
+
+    ``__iter__``/``__len__`` also union the namespace keys so callers that
+    enumerate the context (e.g. ``set(ctx)``, ``dict(ctx)``) see the same
+    keys the eager ``MacroNamespace`` path would have written via
+    ``dct.update(self.namespace)``.
     """
 
     __slots__ = ("_ns",)
@@ -63,6 +68,20 @@ class MacroDictProxy(dict):
         if super().__contains__(key):
             return True
         return isinstance(key, str) and key in self._ns
+
+    def __iter__(self) -> Iterator[str]:
+        seen = set()
+        for key in dict.__iter__(self):
+            seen.add(key)
+            yield key
+        for key in self._ns:
+            if key not in seen:
+                yield key
+
+    def __len__(self) -> int:
+        physical = set(dict.__iter__(self))
+        physical.update(self._ns)
+        return len(physical)
 
     def get(self, key, default=None):
         if super().__contains__(key):

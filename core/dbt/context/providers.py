@@ -2013,7 +2013,13 @@ def generate_runtime_unit_test_context(
 
         # macro overrides of package-namespaced macros
         for (macro_package, macro_name), macro_override_value in package_macro_overrides.items():
-            ctx_dict[macro_package][macro_name] = macro_override_value
+            pkg = ctx_dict[macro_package]
+            if not isinstance(pkg, dict):
+                # LazyMacroNamespace returns a read-only mapping view for packages;
+                # materialize to a mutable dict so the override can be written.
+                pkg = dict(pkg)
+                ctx_dict[macro_package] = pkg
+            pkg[macro_name] = macro_override_value
             # propgate override of namespaced dbt macro to global namespace
             if macro_package == "dbt":
                 ctx_dict[macro_name] = macro_value
@@ -2022,8 +2028,12 @@ def generate_runtime_unit_test_context(
         for macro_name, macro_override_value in global_macro_overrides.items():
             ctx_dict[macro_name] = macro_override_value
             # propgate override of global dbt macro to dbt namespace
-            if ctx_dict["dbt"].get(macro_name):
-                ctx_dict["dbt"][macro_name] = macro_override_value
+            dbt_pkg = ctx_dict["dbt"]
+            if dbt_pkg.get(macro_name):
+                if not isinstance(dbt_pkg, dict):
+                    dbt_pkg = dict(dbt_pkg)
+                    ctx_dict["dbt"] = dbt_pkg
+                dbt_pkg[macro_name] = macro_override_value
 
     return ctx_dict
 

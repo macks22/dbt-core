@@ -349,8 +349,17 @@ def mock_manifest(config, additional_macros=None):
     def gmbp():
         return macros_by_package
 
+    def get_namespace_template(root_package, search_package, internal_packages):
+        return macros.MacroNamespaceBuilder.build_template(
+            root_package=root_package,
+            search_package=search_package,
+            internal_packages=list(internal_packages),
+            macros_by_package=macros_by_package,
+        )
+
     m = mock.MagicMock(macros=manifest_macros)
     m.get_macros_by_package = gmbp
+    m.get_namespace_template = get_namespace_template
     return m
 
 
