@@ -1,0 +1,4 @@
+label,project_id,path_count,wall_s_median,wall_s_stdev,parse_project_elapsed_median,load_all_elapsed_median,load_macros_elapsed_median,process_manifest_elapsed_median,dbt_core_sha,repeats
+baseline,small,476,2.26,0.84,0.12,1.42,0.96,0.03,cd1500898,3
+baseline,medium,942,5.5,2.42,3.26,5.01,0.76,0.25,cd1500898,3
+baseline,large,19180,194.63,7.62,166.6,186.23,2.77,4.65,cd1500898,2
