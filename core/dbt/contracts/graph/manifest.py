@@ -984,6 +984,44 @@ class Manifest(MacroMethods, dbtClassMixin):
         default=None,
         metadata={"serialize": lambda x: None, "deserialize": lambda x: None},
     )
+    _namespace_templates: Dict[Any, Any] = field(
+        default_factory=dict,
+        metadata={"serialize": lambda x: None, "deserialize": lambda x: None},
+    )
+
+    def get_namespace_template(
+        self,
+        root_package: str,
+        search_package: str,
+        internal_packages: Tuple[str, ...],
+    ):
+        """Cache MacroNamespaceBuilder.build_template by (root, search, internals).
+
+        The template is independent of any per-node context, so projects with N
+        nodes that all share the same key build the routing once instead of N
+        times. Invalidated by ``add_macro`` and ``invalidate_namespace_templates``.
+        """
+        from dbt.context.macros import MacroNamespaceBuilder, NamespaceTemplateKey
+
+        key = NamespaceTemplateKey(
+            root_package=root_package,
+            search_package=search_package,
+            internal_packages=tuple(internal_packages),
+        )
+        cached = self._namespace_templates.get(key)
+        if cached is not None:
+            return cached
+        template = MacroNamespaceBuilder.build_template(
+            root_package=root_package,
+            search_package=search_package,
+            internal_packages=list(internal_packages),
+            macros_by_package=self.get_macros_by_package(),
+        )
+        self._namespace_templates[key] = template
+        return template
+
+    def invalidate_namespace_templates(self) -> None:
+        self._namespace_templates.clear()
 
     def __pre_serialize__(self, context: Optional[Dict] = None):
         # serialization won't work with anything except an empty source_patches because
@@ -1400,7 +1438,6 @@ class Manifest(MacroMethods, dbtClassMixin):
         current_project: str,
         node_package: str,
     ) -> MaybeNonSource:
-
         node: Optional[ManifestNode] = None
         disabled: Optional[List[ManifestNode]] = None
 
@@ -1485,7 +1522,6 @@ class Manifest(MacroMethods, dbtClassMixin):
         current_project: str,
         node_package: str,
     ) -> MaybeMetricNode:
-
         metric: Optional[Metric] = None
         disabled: Optional[List[Metric]] = None
 
@@ -1666,6 +1702,11 @@ class Manifest(MacroMethods, dbtClassMixin):
 
         if self._macros_by_package is None:
             self._macros_by_package = self._build_macros_by_package(self.macros)
+
+        # Adding a macro changes namespace routing, so invalidate the template
+        # cache. In practice all macros are added before parse_project starts,
+        # so this clear() is essentially a no-op during model rendering.
+        self.invalidate_namespace_templates()
 
         if macro.package_name not in self._macros_by_package:
             self._macros_by_package[macro.package_name] = {}
@@ -1902,7 +1943,8 @@ V_T = TypeVar("V_T")
 def _expect_value(key: K_T, src: Mapping[K_T, V_T], old_file: SourceFile, name: str) -> V_T:
     if key not in src:
         raise CompilationError(
-            'Expected to find "{}" in cached "result.{}" based '
-            "on cached file information: {}!".format(key, name, old_file)
+            'Expected to find "{}" in cached "result.{}" based on cached file information: {}!'.format(
+                key, name, old_file
+            )
         )
     return src[key]

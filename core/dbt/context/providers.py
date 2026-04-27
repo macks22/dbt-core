@@ -25,7 +25,6 @@ from dbt.adapters.contracts.connection import AdapterResponse
 from dbt.adapters.exceptions import MissingConfigError
 from dbt.adapters.factory import (
     get_adapter,
-    get_adapter_package_names,
     get_adapter_type_names,
 )
 from dbt.artifacts.resources import (
@@ -49,7 +48,7 @@ from dbt.context.configured import FQNLookup
 from dbt.context.context_config import ContextConfig
 from dbt.context.exceptions_jinja import wrapped_exports
 from dbt.context.macro_resolver import MacroResolver, TestMacroNamespace
-from dbt.context.macros import MacroNamespace, MacroNamespaceBuilder
+from dbt.context.macros import MacroNamespace
 from dbt.context.manifest import ManifestContext
 from dbt.contracts.graph.manifest import Disabled, Manifest
 from dbt.contracts.graph.metrics import MetricReference, ResolvedMetricReference
@@ -306,7 +305,6 @@ class BaseResolver(metaclass=abc.ABCMeta):
             and target.config.event_time
             and isinstance(self.model, (ModelNode, SnapshotNode))
         ):
-
             # Handling of microbatch models
             if (
                 isinstance(self.model, ModelNode)
@@ -408,13 +406,11 @@ class BaseSourceResolver(BaseResolver):
     def validate_args(self, source_name: str, table_name: str):
         if not isinstance(source_name, str):
             raise CompilationError(
-                f"The source name (first) argument to source() must be a "
-                f"string, got {type(source_name)}"
+                f"The source name (first) argument to source() must be a string, got {type(source_name)}"
             )
         if not isinstance(table_name, str):
             raise CompilationError(
-                f"The table name (second) argument to source() must be a "
-                f"string, got {type(table_name)}"
+                f"The table name (second) argument to source() must be a string, got {type(table_name)}"
             )
 
     def __call__(self, *args: str) -> RelationProxy:
@@ -1117,17 +1113,8 @@ class ProviderContext(ManifestContext):
         # The macro namespace is used in creating the DatabaseWrapper
         self.db_wrapper = self.provider.DatabaseWrapper(self.adapter, self.namespace)
 
-    # This overrides the method in ManifestContext, and provides
-    # a model, which the ManifestContext builder does not
-    def _get_namespace_builder(self):
-        internal_packages = get_adapter_package_names(self.config.credentials.type)
-        return MacroNamespaceBuilder(
-            self.config.project_name,
-            self.search_package,
-            self.macro_stack,
-            internal_packages,
-            self.model,
-        )
+    def _namespace_node(self):
+        return self.model
 
     @contextproperty()
     def dbt_metadata_envs(self) -> Dict[str, str]:
@@ -1801,7 +1788,8 @@ class ModelContext(ProviderContext):
             return []
         # TODO CT-211
         return [
-            h.to_dict(omit_none=True) for h in self.model.config.pre_hook  # type: ignore[union-attr] # noqa
+            h.to_dict(omit_none=True)
+            for h in self.model.config.pre_hook  # type: ignore[union-attr] # noqa
         ]
 
     @contextproperty()
@@ -1810,7 +1798,8 @@ class ModelContext(ProviderContext):
             return []
         # TODO CT-211
         return [
-            h.to_dict(omit_none=True) for h in self.model.config.post_hook  # type: ignore[union-attr] # noqa
+            h.to_dict(omit_none=True)
+            for h in self.model.config.post_hook  # type: ignore[union-attr] # noqa
         ]
 
     @contextproperty()
@@ -1885,7 +1874,8 @@ class ModelContext(ProviderContext):
         """
         if getattr(self.model, "defer_relation", None):
             return self.db_wrapper.Relation.create_from(
-                self.config, self.model.defer_relation  # type: ignore
+                self.config,
+                self.model.defer_relation,  # type: ignore
             )
         else:
             return None
@@ -2229,7 +2219,7 @@ class TestContext(ProviderContext):
                 if self.model.resource_type == NodeType.Test and self.model.file_key_name:  # type: ignore[union-attr] # noqa
                     source_file = self.manifest.files[self.model.file_id]
                     # TODO CT-211
-                    (yaml_key, name) = self.model.file_key_name.split(".")  # type: ignore[union-attr] # noqa
+                    yaml_key, name = self.model.file_key_name.split(".")  # type: ignore[union-attr] # noqa
                     # TODO CT-211
                     source_file.add_env_var(var, yaml_key, name)  # type: ignore[union-attr]
             return return_value

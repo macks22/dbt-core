@@ -2,3 +2,6 @@ label,project_id,path_count,wall_s_median,wall_s_stdev,parse_project_elapsed_med
 baseline,small,476,2.26,0.84,0.12,1.42,0.96,0.03,cd1500898,3
 baseline,medium,942,5.5,2.42,3.26,5.01,0.76,0.25,cd1500898,3
 baseline,large,19180,194.63,7.62,166.6,186.23,2.77,4.65,cd1500898,2
+phase1,small,476,1.21,1.05,0.04,1.1,0.95,0.03,9d2f24e3e,3
+phase1,medium,942,4.61,1.36,2.39,4.19,0.77,0.24,9d2f24e3e,3
+phase1,large,19180,121.56,6.67,96.0,114.24,1.86,4.39,9d2f24e3e,2
