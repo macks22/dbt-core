@@ -322,13 +322,16 @@ def model_config_schema() -> Dict[str, Any]:
     if _MODEL_CONFIG_SCHEMA is None:
         resources_jsonschema = resources_schema()
         nested_definition_name = "ModelConfig"
+        # Keep ModelConfig in the definitions map: some sibling definitions
+        # contain `$ref: #/definitions/ModelConfig` and excluding it makes
+        # fastjsonschema fail to compile (the lazier Draft7Validator tolerates
+        # this only because it never traverses to the unresolvable ref for
+        # typical inputs).
         _MODEL_CONFIG_SCHEMA = {
             "$schema": "http://json-schema.org/draft-07/schema#",
             "title": nested_definition_name,
             **resources_jsonschema["definitions"][nested_definition_name],
-            "definitions": {
-                k: v for k, v in resources_jsonschema["definitions"].items() if k != nested_definition_name
-            },
+            "definitions": dict(resources_jsonschema["definitions"]),
         }
     return _MODEL_CONFIG_SCHEMA
 
