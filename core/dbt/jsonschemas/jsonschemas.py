@@ -2,19 +2,37 @@ import json
 import re
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, Union
 
+import fastjsonschema
 import jsonschema
+from dbt_common.context import get_invocation_context
 from jsonschema import ValidationError
 from jsonschema._keywords import type as type_rule
 from jsonschema.validators import Draft7Validator, extend
 
 from dbt import deprecations
 from dbt.jsonschemas import JSONSCHEMAS_PATH
-from dbt_common.context import get_invocation_context
 
 _PROJECT_SCHEMA: Optional[Dict[str, Any]] = None
 _RESOURCES_SCHEMA: Optional[Dict[str, Any]] = None
+_MODEL_CONFIG_SCHEMA: Optional[Dict[str, Any]] = None
+
+# fastjsonschema rejects unknown "format" values at compile time, but the dbt
+# resource/project schemas use OpenAPI-style numeric format hints (int32/int64/
+# float/double/uint64) for documentation. The actual numeric constraints are
+# already enforced by "type": "integer" / "number", so we treat these formats
+# as no-op validators.
+_NUMERIC_FORMAT_NOOPS: Dict[str, Callable[[Any], bool]] = {
+    fmt: (lambda _: True) for fmt in ("int32", "int64", "uint64", "float", "double")
+}
+
+# Cache of compiled fastjsonschema validators keyed by id(schema). The schemas
+# returned by project_schema(), resources_schema(), and _model_config_schema()
+# are module-level singletons, so id() is stable for the process lifetime. A
+# value of None marks a schema that fastjsonschema could not compile — we never
+# retry compilation for that schema and always take the slow path.
+_FAST_VALIDATOR_CACHE: Dict[int, Optional[Callable[[Any], Any]]] = {}
 
 _JSONSCHEMA_SUPPORTED_ADAPTERS = {
     "bigquery",
@@ -54,9 +72,7 @@ def project_schema() -> Dict[str, Any]:
     global _PROJECT_SCHEMA
 
     if _PROJECT_SCHEMA is None:
-        _PROJECT_SCHEMA = load_json_from_package(
-            jsonschema_type="project", filename="0.0.110.json"
-        )
+        _PROJECT_SCHEMA = load_json_from_package(jsonschema_type="project", filename="0.0.110.json")
     return _PROJECT_SCHEMA
 
 
@@ -64,9 +80,7 @@ def resources_schema() -> Dict[str, Any]:
     global _RESOURCES_SCHEMA
 
     if _RESOURCES_SCHEMA is None:
-        _RESOURCES_SCHEMA = load_json_from_package(
-            jsonschema_type="resources", filename="latest.json"
-        )
+        _RESOURCES_SCHEMA = load_json_from_package(jsonschema_type="resources", filename="latest.json")
 
     return _RESOURCES_SCHEMA
 
@@ -103,11 +117,49 @@ def _additional_properties_violation_keys(error: ValidationError) -> List[str]:
     return [key.strip("'") for key in found_keys]
 
 
-def _validate_with_schema(
-    schema: Dict[str, Any], json: Dict[str, Any]
-) -> Iterator[ValidationError]:
-    validator = CustomDraft7Validator(schema)
-    return validator.iter_errors(json)
+def _get_fast_validator(schema: Dict[str, Any]) -> Optional[Callable[[Any], Any]]:
+    """Return a cached compiled fastjsonschema validator for `schema`, or None if
+    fastjsonschema cannot compile this schema (in which case the slow path is used).
+    """
+    key = id(schema)
+    if key in _FAST_VALIDATOR_CACHE:
+        return _FAST_VALIDATOR_CACHE[key]
+    try:
+        # use_default=False is critical: fastjsonschema otherwise applies `default`
+        # values from the schema by mutating the input dict. The dbt resource schemas
+        # declare `"default": null` for several optional fields (e.g. `enabled`),
+        # which would inject None into configs and break the downstream
+        # dbt_common.dataclass_schema.dbtClassMixin.validate() check (it uses
+        # jsonschema.Draft7Validator with no custom_type_rule and rejects None for
+        # boolean-typed fields).
+        compiled = fastjsonschema.compile(
+            schema,
+            formats=_NUMERIC_FORMAT_NOOPS,
+            use_default=False,
+        )
+    except Exception:
+        # Schema unsupported by fastjsonschema; remember and never retry.
+        _FAST_VALIDATOR_CACHE[key] = None
+        return None
+    _FAST_VALIDATOR_CACHE[key] = compiled
+    return compiled
+
+
+def _validate_with_schema(schema: Dict[str, Any], json: Dict[str, Any]) -> Iterator[ValidationError]:
+    # Fast path: try the compiled fastjsonschema validator first. On valid data this
+    # is ~5x faster than CustomDraft7Validator and skips the slow error-enumeration
+    # entirely. On invalid data it raises immediately; we then fall through to the
+    # slow path which enumerates ALL errors so jsonschema_validate() can dispatch
+    # the proper deprecation warnings (additionalProperties, anyOf, etc.).
+    fast = _get_fast_validator(schema)
+    if fast is not None:
+        try:
+            fast(json)
+        except fastjsonschema.JsonSchemaException:
+            pass
+        else:
+            return iter(())
+    return CustomDraft7Validator(schema).iter_errors(json)
 
 
 def _get_allowed_config_key_aliases() -> List[str]:
@@ -144,9 +196,9 @@ def _get_allowed_config_fields_from_error_path(
     if "config" not in yml_schema["definitions"][property_field_name]["properties"]:
         return None
 
-    config_field_name = yml_schema["definitions"][property_field_name]["properties"]["config"][
-        "anyOf"
-    ][0]["$ref"].split("/")[-1]
+    config_field_name = yml_schema["definitions"][property_field_name]["properties"]["config"]["anyOf"][0][
+        "$ref"
+    ].split("/")[-1]
 
     allowed_config_fields = list(set(yml_schema["definitions"][config_field_name]["properties"]))
     allowed_config_fields.extend(_get_allowed_config_key_aliases())
@@ -179,7 +231,8 @@ def jsonschema_validate(schema: Dict[str, Any], json: Dict[str, Any], file_path:
             else:
                 key_path = error_path_to_string(error)
                 for key in keys:
-                    # Type params are not in the metrics v2 jsonschema from fusion, but dbt-core continues to maintain support for them in v1.
+                    # Type params are not in the metrics v2 jsonschema from fusion, but
+                    # dbt-core continues to maintain support for them in v1.
                     if key == "type_params":
                         continue
 
@@ -199,9 +252,7 @@ def jsonschema_validate(schema: Dict[str, Any], json: Dict[str, Any], file_path:
                             file=file_path,
                         )
                     else:
-                        allowed_config_fields = _get_allowed_config_fields_from_error_path(
-                            schema, error_path
-                        )
+                        allowed_config_fields = _get_allowed_config_fields_from_error_path(schema, error_path)
                         if allowed_config_fields and key in allowed_config_fields:
                             deprecations.warn(
                                 "property-moved-to-config-deprecation",
@@ -221,10 +272,7 @@ def jsonschema_validate(schema: Dict[str, Any], json: Dict[str, Any], file_path:
             # schema yaml resource configs
             if error_path[-1] == "config":
                 for sub_error in sub_errors:
-                    if (
-                        isinstance(sub_error, ValidationError)
-                        and sub_error.validator == "additionalProperties"
-                    ):
+                    if isinstance(sub_error, ValidationError) and sub_error.validator == "additionalProperties":
                         keys = _additional_properties_violation_keys(sub_error)
                         key_path = error_path_to_string(error)
                         for key in keys:
@@ -265,27 +313,31 @@ def jsonschema_validate(schema: Dict[str, Any], json: Dict[str, Any], file_path:
             )
 
 
-def validate_model_config(
-    config: Dict[str, Any], file_path: str, is_python_model: bool = False
-) -> None:
+def model_config_schema() -> Dict[str, Any]:
+    """Return a singleton dict for the ModelConfig sub-schema. Memoizing the dict
+    keeps id(schema) stable across calls, which lets _get_fast_validator() cache the
+    compiled fastjsonschema validator for it.
+    """
+    global _MODEL_CONFIG_SCHEMA
+    if _MODEL_CONFIG_SCHEMA is None:
+        resources_jsonschema = resources_schema()
+        nested_definition_name = "ModelConfig"
+        _MODEL_CONFIG_SCHEMA = {
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": nested_definition_name,
+            **resources_jsonschema["definitions"][nested_definition_name],
+            "definitions": {
+                k: v for k, v in resources_jsonschema["definitions"].items() if k != nested_definition_name
+            },
+        }
+    return _MODEL_CONFIG_SCHEMA
+
+
+def validate_model_config(config: Dict[str, Any], file_path: str, is_python_model: bool = False) -> None:
     if not _can_run_validations():
         return
 
-    resources_jsonschema = resources_schema()
-    nested_definition_name = "ModelConfig"
-
-    model_config_schema = {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "title": nested_definition_name,
-        **resources_jsonschema["definitions"][nested_definition_name],
-        "definitions": {
-            k: v
-            for k, v in resources_jsonschema["definitions"].items()
-            if k != nested_definition_name
-        },
-    }
-
-    errors = _validate_with_schema(model_config_schema, config)
+    errors = _validate_with_schema(model_config_schema(), config)
     for error in errors:
         error_path = list(error.path)
         if error.validator == "additionalProperties":
@@ -336,10 +388,7 @@ def validate_model_config(
             pass
         elif error.validator == "anyOf" and len(error_path) > 0:
             for sub_error in error.context or []:
-                if (
-                    isinstance(sub_error, ValidationError)
-                    and sub_error.validator == "additionalProperties"
-                ):
+                if isinstance(sub_error, ValidationError) and sub_error.validator == "additionalProperties":
                     error.path.appendleft("config")
                     keys = _additional_properties_violation_keys(sub_error)
                     key_path = error_path_to_string(error)
