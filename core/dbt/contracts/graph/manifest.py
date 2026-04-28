@@ -1032,6 +1032,11 @@ class Manifest(MacroMethods, dbtClassMixin):
     @classmethod
     def __post_deserialize__(cls, obj):
         obj._lock = get_mp_context().Lock()
+        # The `deserialize: lambda x: None` metadata above zeroes these private
+        # caches during msgpack deserialization (e.g. partial-parse from disk).
+        # Restore them to their default-factory values so subsequent accesses
+        # don't AttributeError on `.get(...)` / `.clear()`.
+        obj._namespace_templates = {}
         return obj
 
     def build_flat_graph(self):
